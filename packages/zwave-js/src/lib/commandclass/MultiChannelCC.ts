@@ -54,6 +54,13 @@ export enum MultiChannelCommand {
 
 // @noSetValueAPI
 
+export function getEndpointIndizesValueId(): ValueID {
+	return {
+		commandClass: CommandClasses["Multi Channel"],
+		property: "endpointIndizes",
+	};
+}
+
 export function getEndpointCCsValueId(endpointIndex: number): ValueID {
 	return {
 		commandClass: CommandClasses["Multi Channel"],
@@ -297,6 +304,11 @@ export class MultiChannelCC extends CommandClass {
 		});
 	}
 
+	public skipEndpointInterview(): boolean {
+		// The endpoints are discovered by querying the root device
+		return true;
+	}
+
 	public async interview(): Promise<void> {
 		const node = this.getNode()!;
 		this.driver.controllerLog.logNode(node.id, {
@@ -343,7 +355,7 @@ identical capabilities:      ${multiResponse.identicalCapabilities}`;
 			direction: "inbound",
 		});
 
-		const endpointsToQuery: number[] = [];
+		const allEndpoints: number[] = [];
 		const addSequentialEndpoints = (): void => {
 			for (
 				let i = 1;
@@ -352,7 +364,7 @@ identical capabilities:      ${multiResponse.identicalCapabilities}`;
 					(multiResponse.aggregatedEndpointCount ?? 0);
 				i++
 			) {
-				endpointsToQuery.push(i);
+				allEndpoints.push(i);
 			}
 		};
 		if (api.supportsCommand(MultiChannelCommand.EndPointFind)) {
@@ -364,8 +376,8 @@ identical capabilities:      ${multiResponse.identicalCapabilities}`;
 			});
 
 			const foundEndpoints = await api.findEndpoints(0xff, 0xff);
-			if (foundEndpoints) endpointsToQuery.push(...foundEndpoints);
-			if (!endpointsToQuery.length) {
+			if (foundEndpoints) allEndpoints.push(...foundEndpoints);
+			if (!allEndpoints.length) {
 				// Create a sequential list of endpoints
 				this.driver.controllerLog.logNode(node.id, {
 					endpoint: this.endpointIndex,
@@ -376,7 +388,7 @@ identical capabilities:      ${multiResponse.identicalCapabilities}`;
 			} else {
 				this.driver.controllerLog.logNode(node.id, {
 					endpoint: this.endpointIndex,
-					message: `received endpoints: ${endpointsToQuery
+					message: `received endpoints: ${allEndpoints
 						.map(String)
 						.join(", ")}`,
 					direction: "inbound",
@@ -394,7 +406,7 @@ identical capabilities:      ${multiResponse.identicalCapabilities}`;
 
 		// Step 3: Query endpoints
 		let hasQueriedCapabilities = false;
-		for (const endpoint of endpointsToQuery) {
+		for (const endpoint of allEndpoints) {
 			if (
 				endpoint > multiResponse.individualEndpointCount &&
 				this.version >= 4
@@ -428,7 +440,7 @@ identical capabilities:      ${multiResponse.identicalCapabilities}`;
 
 				// copy the capabilities from the first endpoint
 				const ep1Caps = this.getValueDB().getValue<CommandClasses[]>(
-					getEndpointCCsValueId(endpointsToQuery[0]),
+					getEndpointCCsValueId(allEndpoints[0]),
 				)!;
 				this.getValueDB().setValue(getEndpointCCsValueId(endpoint), [
 					...ep1Caps,
@@ -468,6 +480,9 @@ supported CCs:`;
 				return this.throwMissingCriticalInterviewResponse();
 			}
 		}
+
+		// Now that all endpoints have been interviewed, remember which ones are there
+		this.getValueDB().setValue(getEndpointIndizesValueId(), allEndpoints);
 
 		// Remember that the interview is complete
 		this.interviewComplete = true;

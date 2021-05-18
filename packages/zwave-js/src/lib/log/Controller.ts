@@ -22,7 +22,7 @@ const VALUE_LOGLEVEL = "debug";
 
 interface LogNodeOptions {
 	message: string;
-	level?: "warn" | "error";
+	level?: "verbose" | "warn" | "error";
 	direction?: DataDirection;
 	endpoint?: number;
 }
@@ -46,7 +46,7 @@ export class ControllerLogger extends ZWaveLoggerBase {
 	 * Logs a message
 	 * @param msg The message to output
 	 */
-	public print(message: string, level?: "warn" | "error"): void {
+	public print(message: string, level?: "verbose" | "warn" | "error"): void {
 		const actualLevel = level || CONTROLLER_LOGLEVEL;
 		if (!this.container.isLoglevelVisible(actualLevel)) return;
 
@@ -65,7 +65,7 @@ export class ControllerLogger extends ZWaveLoggerBase {
 	public logNode(
 		nodeId: number,
 		message: string,
-		level?: "warn" | "error",
+		level?: "verbose" | "warn" | "error",
 	): void;
 
 	/**
@@ -77,7 +77,7 @@ export class ControllerLogger extends ZWaveLoggerBase {
 	public logNode(
 		nodeId: number,
 		messageOrOptions: string | LogNodeOptions,
-		logLevel?: "warn" | "error",
+		logLevel?: "verbose" | "warn" | "error",
 	): void {
 		if (typeof messageOrOptions === "string") {
 			return this.logNode(nodeId, {
@@ -128,6 +128,7 @@ export class ControllerLogger extends ZWaveLoggerBase {
 		args: LogValueArgs<ValueID>,
 	): void {
 		if (!this.isValueLogVisible()) return;
+		if (!this.container.shouldLogNode(args.nodeId)) return;
 
 		const primaryTags: string[] = [
 			getNodeTag(args.nodeId),
@@ -181,6 +182,7 @@ export class ControllerLogger extends ZWaveLoggerBase {
 	/** Prints a log message for updated metadata of a value id */
 	public metadataUpdated(args: LogValueArgs<ValueID>): void {
 		if (!this.isValueLogVisible()) return;
+		if (!this.container.shouldLogNode(args.nodeId)) return;
 
 		const primaryTags: string[] = [
 			getNodeTag(args.nodeId),

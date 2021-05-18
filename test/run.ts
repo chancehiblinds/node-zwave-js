@@ -214,6 +214,10 @@ const driver = new Driver("tcp://heizung.fritz.box:31337", {
 		// 		// );
 	});
 void driver.start();
+// driver.enableStatistics({
+// 	applicationName: "test",
+// 	applicationVersion: "0.0.1",
+// });
 
 // // // @ts-check
 // // require("reflect-metadata");

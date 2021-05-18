@@ -1,5 +1,3 @@
-// AEON Labs ZW080
-// Siren Gen5
 {
 	"manufacturer": "AEON Labs",
 	"manufacturerId": "0x0086",
@@ -15,11 +13,6 @@
 			"productType": "0x0204",
 			"productId": "0x0050",
 			"zwaveAllianceId": 1141
-		},
-		{
-			"productType": "0x0004",
-			"productId": "0x0050",
-			"zwaveAllianceId": 1136
 		}
 	],
 	"firmwareVersion": {
@@ -40,9 +33,6 @@
 			"minValue": 1,
 			"maxValue": 5,
 			"defaultValue": 1,
-			"readOnly": false,
-			"writeOnly": false,
-			"allowManualEntry": true,
 			"options": [
 				{
 					"label": "Sound 1",

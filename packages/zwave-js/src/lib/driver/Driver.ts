@@ -10,6 +10,7 @@ import {
 	LogConfig,
 	SecurityManager,
 	serializeCacheValue,
+	timespan,
 	ValueMetadata,
 	ZWaveError,
 	ZWaveErrorCodes,
@@ -113,7 +114,6 @@ import {
 	compileStatistics,
 	sendStatistics,
 } from "../telemetry/statistics";
-import type { FileSystem } from "./FileSystem";
 import {
 	createSendThreadMachine,
 	SendThreadInterpreter,
@@ -122,9 +122,13 @@ import {
 } from "./SendThreadMachine";
 import { throttlePresets } from "./ThrottlePresets";
 import { Transaction } from "./Transaction";
+import { checkForConfigUpdates, installConfigUpdate } from "./UpdateConfig";
+import type { ZWaveOptions } from "./ZWaveOptions";
 
-// eslint-disable-next-line
-const { version: libVersion } = require("../../../package.json");
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const packageJson = require("../../../package.json");
+const libVersion: string = packageJson.version;
+
 // This is made with cfonts:
 const libNameString = `
 ███████╗ ██╗    ██╗  █████╗  ██╗   ██╗ ███████╗             ██╗ ███████╗
@@ -134,95 +138,6 @@ const libNameString = `
 ███████╗ ╚███╔███╔╝ ██║  ██║  ╚████╔╝  ███████╗        ╚█████╔╝ ███████║
 ╚══════╝  ╚══╝╚══╝  ╚═╝  ╚═╝   ╚═══╝   ╚══════╝         ╚════╝  ╚══════╝
 `;
-
-export interface ZWaveOptions {
-	/** Specify timeouts in milliseconds */
-	timeouts: {
-		/** how long to wait for an ACK */
-		ack: number; // >=1, default: 1000 ms
-		/** not sure */
-		byte: number; // >=1, default: 150 ms
-		/**
-		 * How long to wait for a controller response. Usually this timeout should never elapse,
-		 * so this is merely a safeguard against the driver stalling
-		 */
-		response: number; // [500...5000], default: 1600 ms
-		/** How long to wait for a callback from the host for a SendData[Multicast]Request */
-		sendDataCallback: number; // >=10000, default: 65000 ms
-		/** How much time a node gets to process a request and send a response */
-		report: number; // [1000...40000], default: 10000 ms
-		/** How long generated nonces are valid */
-		nonce: number; // [3000...20000], default: 5000 ms
-
-		/**
-		 * @internal
-		 * How long to wait for a poll after setting a value
-		 */
-		refreshValue: number;
-	};
-
-	attempts: {
-		/** How often the driver should try communication with the controller before giving up */
-		controller: number; // [1...3], default: 3
-		/** How often the driver should try sending SendData commands before giving up */
-		sendData: number; // [1...5], default: 3
-		/** Whether a command should be retried when a node acknowledges the receipt but no response is received */
-		retryAfterTransmitReport: boolean; // default: false
-		/**
-		 * How many attempts should be made for each node interview before giving up
-		 */
-		nodeInterview: number; // [1...10], default: 5
-	};
-
-	/**
-	 * Optional log configuration
-	 */
-	logConfig?: LogConfig;
-
-	/**
-	 * @internal
-	 * Set this to true to skip the controller interview. Useful for testing purposes
-	 */
-	skipInterview?: boolean;
-
-	storage: {
-		/** Allows you to replace the default file system driver used to store and read the cache */
-		driver: FileSystem;
-		/** Allows you to specify a different cache directory */
-		cacheDir: string;
-		/**
-		 * How frequently the values and metadata should be written to the DB files. This is a compromise between data loss
-		 * in cause of a crash and disk wear:
-		 *
-		 * * `"fast"` immediately writes every change to disk
-		 * * `"slow"` writes at most every 5 minutes or after 500 changes - whichever happens first
-		 * * `"normal"` is a compromise between the two options
-		 */
-		throttle: "fast" | "normal" | "slow";
-	};
-
-	/** Specify the network key to use for encryption. This must be a Buffer of exactly 16 bytes. */
-	networkKey?: Buffer;
-
-	/**
-	 * Some Command Classes support reporting that a value is unknown.
-	 * When this flag is `false`, unknown values are exposed as `undefined`.
-	 * When it is `true`, unknown values are exposed as the literal string "unknown" (even if the value is normally numeric).
-	 * Default: `false` */
-	preserveUnknownValues?: boolean;
-
-	/**
-	 * Some SET-type commands optimistically update the current value to match the target value
-	 * when the device acknowledges the command.
-	 *
-	 * While this generally makes UIs feel more responsive, it is not necessary for devices which report their status
-	 * on their own and can lead to confusing behavior when dealing with slow devices like blinds.
-	 *
-	 * To disable the optimistic update, set this option to `true`.
-	 * Default: `false`
-	 */
-	disableOptimisticValueUpdate?: boolean;
-}
 
 const defaultOptions: ZWaveOptions = {
 	timeouts: {
@@ -472,6 +387,10 @@ export class Driver extends EventEmitter {
 	}
 
 	public readonly configManager: ConfigManager;
+	private _configVersion: string;
+	public get configVersion(): string {
+		return this._configVersion;
+	}
 
 	private _logContainer: ZWaveLogContainer;
 	private _driverLog: DriverLogger;
@@ -533,7 +452,18 @@ export class Driver extends EventEmitter {
 		this.cacheDir = this.options.storage.cacheDir;
 
 		// Initialize config manager
-		this.configManager = new ConfigManager(this._logContainer);
+		try {
+			// eslint-disable-next-line @typescript-eslint/no-var-requires
+			this._configVersion = require("@zwave-js/config/package.json").version;
+		} catch {
+			this._configVersion =
+				packageJson?.dependencies?.["@zwave-js/config"] ?? libVersion;
+		}
+		this.configManager = new ConfigManager({
+			logContainer: this._logContainer,
+			deviceConfigPriorityDir: this.options.storage
+				.deviceConfigPriorityDir,
+		});
 
 		// And initialize but don't start the send thread machine
 		const sendThreadMachine = createSendThreadMachine(
@@ -683,6 +613,11 @@ export class Driver extends EventEmitter {
 		// Log which version is running
 		this.driverLog.print(libNameString, "info");
 		this.driverLog.print(`version ${libVersion}`, "info");
+		// wotan-disable-next-line no-restricted-property-access
+		this.configManager["logger"].print(
+			`version ${this.configVersion}`,
+			"info",
+		);
 		this.driverLog.print("", "info");
 
 		this.driverLog.print("starting driver...");
@@ -707,7 +642,7 @@ export class Driver extends EventEmitter {
 			.on("data", this.serialport_onData.bind(this))
 			.on("error", (err) => {
 				this.driverLog.print(
-					`serial port errored: ${err.message}`,
+					`Serial port errored: ${err.message}`,
 					"error",
 				);
 				if (this._isOpen) {
@@ -748,14 +683,7 @@ export class Driver extends EventEmitter {
 			// Load the necessary configuration
 			this.driverLog.print("loading configuration...");
 			try {
-				await this.configManager.loadDeviceClasses();
-				await this.configManager.loadManufacturers();
-				await this.configManager.loadDeviceIndex();
-				await this.configManager.loadNotifications();
-				await this.configManager.loadNamedScales();
-				await this.configManager.loadSensorTypes();
-				await this.configManager.loadMeters();
-				await this.configManager.loadIndicators();
+				await this.configManager.loadAll();
 			} catch (e) {
 				const message = `Failed to load the configuration: ${e.message}`;
 				this.driverLog.print(message, "error");
@@ -1324,7 +1252,7 @@ export class Driver extends EventEmitter {
 			this.statisticsTimeout = undefined;
 		}
 
-		let success = false;
+		let success: number | boolean = false;
 		try {
 			const statistics = await compileStatistics(this, {
 				driverVersion: libVersion,
@@ -1335,15 +1263,30 @@ export class Driver extends EventEmitter {
 			// Didn't work - try again in a few hours
 			success = false;
 		} finally {
-			this.driverLog.print(
-				success
-					? `Usage statistics sent - next transmission scheduled in 23 hours.`
-					: `Failed to send usage statistics - next transmission scheduled in 6 hours.`,
-				"verbose",
-			);
-			this.statisticsTimeout = setTimeout(() => {
-				void this.compileAndSendStatistics();
-			}, (success ? 23 : 6) * 3600 * 1000 /* 6 or 23 hours */).unref();
+			if (typeof success === "number") {
+				this.driverLog.print(
+					`Sending usage statistics was rate limited - next attempt scheduled in ${success} seconds.`,
+					"verbose",
+				);
+				// Wait at most 6 hours to try again
+				const retryMs = Math.max(
+					timespan.minutes(1),
+					Math.min(success * 1000, timespan.hours(6)),
+				);
+				this.statisticsTimeout = setTimeout(() => {
+					void this.compileAndSendStatistics();
+				}, retryMs).unref();
+			} else {
+				this.driverLog.print(
+					success
+						? `Usage statistics sent - next transmission scheduled in 23 hours.`
+						: `Failed to send usage statistics - next transmission scheduled in 6 hours.`,
+					"verbose",
+				);
+				this.statisticsTimeout = setTimeout(() => {
+					void this.compileAndSendStatistics();
+				}, timespan.hours(success ? 23 : 6)).unref();
+			}
 		}
 	}
 
@@ -1388,22 +1331,6 @@ export class Driver extends EventEmitter {
 						"error",
 					);
 				});
-
-			// Remove the node id from all cached neighbor lists and asynchronously make the affected nodes update their neighbor lists
-			for (const otherNode of this.controller.nodes.values()) {
-				if (
-					otherNode !== node &&
-					otherNode.neighbors.includes(node.id)
-				) {
-					otherNode.removeNodeFromCachedNeighbors(node.id);
-					otherNode.queryNeighborsInternal().catch((err) => {
-						this.driverLog.print(
-							`Failed to update neighbors for node ${otherNode.id}: ${err.message}`,
-							"warn",
-						);
-					});
-				}
-			}
 		}
 
 		// And clean up all remaining resources used by the node
@@ -2133,18 +2060,8 @@ ${handlers.length} left`,
 					message: `The node was reset locally, removing it`,
 					direction: "inbound",
 				});
-				if (!(await this.controller.isFailedNode(msg.command.nodeId))) {
-					try {
-						// Force a ping of the node, so it gets added to the failed nodes list
-						node.markAsAwake();
-						await node.commandClasses["No Operation"].send();
-					} catch {
-						// this is expected
-					}
-				}
 
 				try {
-					// ...because we can only remove failed nodes
 					await this.controller.removeFailedNode(msg.command.nodeId);
 				} catch (e) {
 					this.controllerLog.logNode(msg.command.nodeId, {
@@ -2459,8 +2376,12 @@ ${handlers.length} left`,
 					(e.code === ZWaveErrorCodes.Controller_ResponseNOK ||
 						e.code === ZWaveErrorCodes.Controller_CallbackNOK) &&
 					e.context instanceof Message &&
+					// We need to check the function type here because context can be the transmit reports
 					e.context.functionType !== FunctionType.SendData &&
-					e.context.functionType !== FunctionType.SendDataMulticast
+					e.context.functionType !== FunctionType.SendDataMulticast &&
+					e.context.functionType !== FunctionType.SendDataBridge &&
+					e.context.functionType !==
+						FunctionType.SendDataMulticastBridge
 				) {
 					return e.context as TResponse;
 				}
@@ -2935,5 +2856,71 @@ ${handlers.length} left`,
 	// This does not all need to be printed to the console
 	public [util.inspect.custom](): string {
 		return "[Driver]";
+	}
+
+	/**
+	 * Checks whether there is a compatible update for the currently installed config package.
+	 * Returns the new version if there is an update, `undefined` otherwise.
+	 */
+	public async checkForConfigUpdates(
+		silent: boolean = false,
+	): Promise<string | undefined> {
+		try {
+			if (!silent)
+				this.driverLog.print("Checking for configuration updates...");
+			const ret = await checkForConfigUpdates(this._configVersion);
+			if (ret) {
+				if (!silent)
+					this.driverLog.print(
+						`Configuration update available: ${ret}`,
+					);
+			} else {
+				if (!silent)
+					this.driverLog.print(
+						"No configuration update available...",
+					);
+			}
+			return ret;
+		} catch (e) {
+			this.driverLog.print(e.message, "error");
+		}
+	}
+
+	/**
+	 * Installs an update for the embedded configuration DB if there is a compatible one.
+	 * Returns `true` when an update was installed, `false` otherwise.
+	 *
+	 * **Note:** Bugfixes and changes to device configuration generally require a restart or re-interview to take effect.
+	 */
+	public async installConfigUpdate(): Promise<boolean> {
+		const newVersion = await this.checkForConfigUpdates(true);
+		if (!newVersion) return false;
+
+		try {
+			this.driverLog.print(
+				`Installing version ${newVersion} of configuration DB...`,
+			);
+			await installConfigUpdate(newVersion);
+		} catch (e) {
+			this.driverLog.print(e.message, "error");
+			return false;
+		}
+		this.driverLog.print(
+			`Configuration DB updated to version ${newVersion}, activating...`,
+		);
+		// Remember that we use the new version
+		this._configVersion = newVersion;
+		// and reload the config files
+		await this.configManager.loadAll();
+
+		// Now try to apply them to all known devices
+		if (this._controller) {
+			for (const node of this._controller.nodes.values()) {
+				// wotan-disable-next-line no-restricted-property-access
+				if (node.ready) await node["loadDeviceConfig"]();
+			}
+		}
+
+		return true;
 	}
 }

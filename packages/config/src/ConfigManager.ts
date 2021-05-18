@@ -22,6 +22,7 @@ import {
 	DeviceConfig,
 	DeviceConfigIndex,
 	FulltextDeviceConfigIndex,
+	generatePriorityDeviceIndex,
 	loadDeviceIndexInternal,
 	loadFulltextDeviceIndexInternal,
 } from "./Devices";
@@ -61,15 +62,24 @@ import {
 	SensorType,
 	SensorTypeMap,
 } from "./SensorTypes";
-import { configDir, getDeviceEntryPredicate } from "./utils";
+import {
+	configDir,
+	externalConfigDir,
+	getDeviceEntryPredicate,
+	syncExternalConfigDir,
+} from "./utils";
+
+export interface ConfigManagerOptions {
+	logContainer?: ZWaveLogContainer;
+	deviceConfigPriorityDir?: string;
+}
 
 export class ConfigManager {
-	public constructor(container?: ZWaveLogContainer) {
-		// Make it easier to use this in tests and scripts
-		if (!container) {
-			container = new ZWaveLogContainer({ enabled: false });
-		}
-		this.logger = new ConfigLogger(container);
+	public constructor(options: ConfigManagerOptions = {}) {
+		this.logger = new ConfigLogger(
+			options.logContainer ?? new ZWaveLogContainer({ enabled: false }),
+		);
+		this.deviceConfigPriorityDir = options.deviceConfigPriorityDir;
 	}
 
 	private logger: ConfigLogger;
@@ -82,13 +92,39 @@ export class ConfigManager {
 	private meters: MeterMap | undefined;
 	private basicDeviceClasses: BasicDeviceClassMap | undefined;
 	private genericDeviceClasses: GenericDeviceClassMap | undefined;
+
+	private deviceConfigPriorityDir: string | undefined;
 	private index: DeviceConfigIndex | undefined;
 	private fulltextIndex: FulltextDeviceConfigIndex | undefined;
 	private notifications: NotificationMap | undefined;
 
+	private useExternalConfig: boolean = false;
+
+	public async loadAll(): Promise<void> {
+		// If the environment option for an external config dir is set
+		// try to sync it and then use it
+		this.useExternalConfig = await syncExternalConfigDir(this.logger);
+		if (this.useExternalConfig) {
+			this.logger.print(
+				`Using external configuration dir ${externalConfigDir}`,
+			);
+		}
+
+		await this.loadDeviceClasses();
+		await this.loadManufacturers();
+		await this.loadDeviceIndex();
+		await this.loadNotifications();
+		await this.loadNamedScales();
+		await this.loadSensorTypes();
+		await this.loadMeters();
+		await this.loadIndicators();
+	}
+
 	public async loadManufacturers(): Promise<void> {
 		try {
-			this.manufacturers = await loadManufacturersInternal();
+			this.manufacturers = await loadManufacturersInternal(
+				this.useExternalConfig,
+			);
 		} catch (e: unknown) {
 			// If the config file is missing or invalid, don't try to find it again
 			if (isZWaveError(e) && e.code === ZWaveErrorCodes.Config_Invalid) {
@@ -153,7 +189,7 @@ export class ConfigManager {
 
 	public async loadIndicators(): Promise<void> {
 		try {
-			const config = await loadIndicatorsInternal();
+			const config = await loadIndicatorsInternal(this.useExternalConfig);
 			this.indicators = config.indicators;
 			this.indicatorProperties = config.properties;
 		} catch (e: unknown) {
@@ -205,7 +241,9 @@ export class ConfigManager {
 
 	public async loadNamedScales(): Promise<void> {
 		try {
-			this.namedScales = await loadNamedScalesInternal();
+			this.namedScales = await loadNamedScalesInternal(
+				this.useExternalConfig,
+			);
 		} catch (e: unknown) {
 			// If the config file is missing or invalid, don't try to find it again
 			if (isZWaveError(e) && e.code === ZWaveErrorCodes.Config_Invalid) {
@@ -245,7 +283,10 @@ export class ConfigManager {
 
 	public async loadSensorTypes(): Promise<void> {
 		try {
-			this.sensorTypes = await loadSensorTypesInternal(this);
+			this.sensorTypes = await loadSensorTypesInternal(
+				this,
+				this.useExternalConfig,
+			);
 		} catch (e: unknown) {
 			// If the config file is missing or invalid, don't try to find it again
 			if (isZWaveError(e) && e.code === ZWaveErrorCodes.Config_Invalid) {
@@ -291,7 +332,7 @@ export class ConfigManager {
 
 	public async loadMeters(): Promise<void> {
 		try {
-			this.meters = await loadMetersInternal();
+			this.meters = await loadMetersInternal(this.useExternalConfig);
 		} catch (e: unknown) {
 			// If the config file is missing or invalid, don't try to find it again
 			if (isZWaveError(e) && e.code === ZWaveErrorCodes.Config_Invalid) {
@@ -336,7 +377,9 @@ export class ConfigManager {
 
 	public async loadDeviceClasses(): Promise<void> {
 		try {
-			const config = await loadDeviceClassesInternal();
+			const config = await loadDeviceClassesInternal(
+				this.useExternalConfig,
+			);
 			this.basicDeviceClasses = config.basicDeviceClasses;
 			this.genericDeviceClasses = config.genericDeviceClasses;
 		} catch (e: unknown) {
@@ -402,7 +445,30 @@ export class ConfigManager {
 
 	public async loadDeviceIndex(): Promise<void> {
 		try {
-			this.index = await loadDeviceIndexInternal(this.logger);
+			// The index of config files included in this package
+			const embeddedIndex = await loadDeviceIndexInternal(
+				this.logger,
+				this.useExternalConfig,
+			);
+			// A dynamic index of the user-defined priority device config files
+			const priorityIndex: DeviceConfigIndex = [];
+			if (this.deviceConfigPriorityDir) {
+				if (await pathExists(this.deviceConfigPriorityDir)) {
+					priorityIndex.push(
+						...(await generatePriorityDeviceIndex(
+							this.deviceConfigPriorityDir,
+							this.logger,
+						)),
+					);
+				} else {
+					this.logger.print(
+						`Priority device configuration directory ${this.deviceConfigPriorityDir} not found`,
+						"warn",
+					);
+				}
+			}
+			// Put the priority index in front, so the files get resolved first
+			this.index = [...priorityIndex, ...embeddedIndex];
 		} catch (e: unknown) {
 			// If the index file is missing or invalid, don't try to find it again
 			if (
@@ -465,11 +531,9 @@ export class ConfigManager {
 		);
 
 		if (indexEntry) {
-			const filePath = path.join(
-				configDir,
-				"devices",
-				indexEntry.filename,
-			);
+			const filePath = path.isAbsolute(indexEntry.filename)
+				? indexEntry.filename
+				: path.join(configDir, "devices", indexEntry.filename);
 			if (!(await pathExists(filePath))) return;
 
 			try {
@@ -515,7 +579,9 @@ export class ConfigManager {
 
 	public async loadNotifications(): Promise<void> {
 		try {
-			this.notifications = await loadNotificationsInternal();
+			this.notifications = await loadNotificationsInternal(
+				this.useExternalConfig,
+			);
 		} catch (e: unknown) {
 			// If the config file is missing or invalid, don't try to find it again
 			if (isZWaveError(e) && e.code === ZWaveErrorCodes.Config_Invalid) {

@@ -3,6 +3,7 @@ import {
 	NotificationParameterWithCommandClass,
 	NotificationParameterWithDuration,
 	NotificationParameterWithValue,
+	NotificationValueDefinition,
 } from "@zwave-js/config";
 import {
 	CommandClasses,
@@ -362,7 +363,9 @@ export class NotificationCC extends CommandClass {
 				node.supportsCC(CommandClasses["Association Group Information"])
 			) {
 				const assocGroups = this.driver.controller.getAssociationGroups(
-					node.id,
+					{
+						nodeId: node.id,
+					},
 				);
 				for (const group of assocGroups.values()) {
 					// Check if this group sends Notification Reports
@@ -877,18 +880,31 @@ export class NotificationCCReport extends NotificationCC {
 				"V1 alarm level": this.alarmLevel,
 			};
 		} else {
-			const valueConfig = this.driver.configManager
-				.lookupNotification(this.notificationType!)
-				?.lookupValue(this.notificationEvent!);
-			message = {
-				"notification type": this.driver.configManager.getNotificationName(
-					this.notificationType!,
-				),
-				"notification status": this.notificationStatus,
-				[`notification ${valueConfig?.type ?? "event"}`]:
-					valueConfig?.label ??
-					`Unknown (${num2hex(this.notificationEvent)})`,
-			};
+			let valueConfig: NotificationValueDefinition | undefined;
+			try {
+				valueConfig = this.driver.configManager
+					.lookupNotification(this.notificationType!)
+					?.lookupValue(this.notificationEvent!);
+			} catch {
+				/* ignore */
+			}
+			if (valueConfig) {
+				message = {
+					"notification type": this.driver.configManager.getNotificationName(
+						this.notificationType!,
+					),
+					"notification status": this.notificationStatus,
+					[`notification ${valueConfig?.type ?? "event"}`]:
+						valueConfig?.label ??
+						`Unknown (${num2hex(this.notificationEvent)})`,
+				};
+			} else {
+				message = {
+					"notification type": this.notificationType,
+					"notification status": this.notificationStatus,
+					"notification event": num2hex(this.notificationEvent),
+				};
+			}
 		}
 		if (this.zensorNetSourceNodeId) {
 			message["zensor net source node id"] = this.zensorNetSourceNodeId;
